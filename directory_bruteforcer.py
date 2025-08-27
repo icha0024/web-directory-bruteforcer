@@ -7,18 +7,51 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import argparse
+import random
 
 class DirectoryBruteForcer:
-    def __init__(self, target_url, threads=20, timeout=10, status_codes=None):
-        self.target_url = target_url.rstrip('/')
+    def __init__(self, target_url, threads=20, timeout=10, status_codes=None, user_agents=None):
+        self.target_url = self.normalize_url(target_url)
         self.session = requests.Session()
         self.found_directories = []
         self.threads = threads
         self.timeout = timeout
         self.status_codes = status_codes or [200, 301, 302, 403, 401]
+        self.user_agents = user_agents or []
         self.lock = Lock()
         self.total_tested = 0
         
+    def normalize_url(self, url):
+        """Normalize URL and ensure proper protocol"""
+        url = url.rstrip('/')
+        
+        # Add protocol if missing
+        if not url.startswith(('http://', 'https://')):
+            # Try HTTPS first, fallback to HTTP if needed
+            url = 'https://' + url
+        
+        return url
+    
+    def detect_protocol(self, base_url):
+        """Auto-detect if HTTPS is supported, fallback to HTTP"""
+        if base_url.startswith('https://'):
+            try:
+                # Test HTTPS connectivity
+                test_response = requests.get(base_url, timeout=5, verify=False)
+                return base_url  # HTTPS works
+            except:
+                # HTTPS failed, try HTTP
+                http_url = base_url.replace('https://', 'http://')
+                try:
+                    test_response = requests.get(http_url, timeout=5, verify=False)
+                    print(f"[INFO] HTTPS failed, using HTTP: {http_url}")
+                    return http_url
+                except:
+                    print(f"[WARNING] Both HTTPS and HTTP failed for {base_url}")
+                    return base_url  # Return original, let it fail later
+        
+        return base_url
+    
     def validate_url(self, url):
         """Validate if URL is properly formatted"""
         try:
@@ -27,6 +60,15 @@ class DirectoryBruteForcer:
         except:
             return False
     
+    def load_user_agents(self, user_agents_path="config/user-agents.txt"):
+        """Load user agents from file"""
+        try:
+            with open(user_agents_path, 'r', encoding='utf-8') as f:
+                agents = [line.strip() for line in f if line.strip()]
+            return agents
+        except FileNotFoundError:
+            # Return default user agent if file not found
+            return ["Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"]
     def load_wordlist(self, wordlist_path):
         """Load wordlist from file"""
         try:
@@ -45,10 +87,16 @@ class DirectoryBruteForcer:
         """Test a single directory/file"""
         test_url = urljoin(self.target_url + '/', directory)
         
+        # Get random user agent if available
+        headers = {}
+        if self.user_agents:
+            headers['User-Agent'] = random.choice(self.user_agents)
+        
         try:
             response = self.session.get(
                 test_url, 
                 timeout=self.timeout,
+                headers=headers,
                 allow_redirects=False,
                 verify=False  # Ignore SSL certificate errors
             )
@@ -95,10 +143,19 @@ class DirectoryBruteForcer:
             print(f"[ERROR] Invalid URL: {self.target_url}")
             return
         
+        # Auto-detect protocol if needed
+        self.target_url = self.detect_protocol(self.target_url)
+        
+        # Load user agents
+        if not self.user_agents:
+            self.user_agents = self.load_user_agents()
+        
         if not quiet:
             print(f"[INFO] Starting directory brute force on: {self.target_url}")
+            print(f"[INFO] Protocol: {'HTTPS' if self.target_url.startswith('https') else 'HTTP'}")
             print(f"[INFO] Using {self.threads} threads")
             print(f"[INFO] Timeout: {self.timeout} seconds")
+            print(f"[INFO] User agents: {len(self.user_agents)} loaded")
             print(f"[INFO] Status codes: {', '.join(map(str, self.status_codes))}")
             print(f"[INFO] Ignoring SSL certificate errors")
         
