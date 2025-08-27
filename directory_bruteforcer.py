@@ -1,5 +1,3 @@
-#!/usr/bin/env python3
-
 import requests
 import sys
 import os
@@ -8,13 +6,16 @@ import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
+import argparse
 
 class DirectoryBruteForcer:
-    def __init__(self, target_url, threads=20):
+    def __init__(self, target_url, threads=20, timeout=10, status_codes=None):
         self.target_url = target_url.rstrip('/')
         self.session = requests.Session()
         self.found_directories = []
         self.threads = threads
+        self.timeout = timeout
+        self.status_codes = status_codes or [200, 301, 302, 403, 401]
         self.lock = Lock()
         self.total_tested = 0
         
@@ -47,7 +48,7 @@ class DirectoryBruteForcer:
         try:
             response = self.session.get(
                 test_url, 
-                timeout=10,
+                timeout=self.timeout,
                 allow_redirects=False,
                 verify=False  # Ignore SSL certificate errors
             )
@@ -59,8 +60,8 @@ class DirectoryBruteForcer:
             with self.lock:
                 self.total_tested += 1
                 
-                # Print results for interesting status codes
-                if status_code in [200, 301, 302, 403, 401]:
+                # Print results for specified status codes
+                if status_code in self.status_codes:
                     status_msg = f"[{status_code}] {test_url} (Size: {content_length})"
                     print(status_msg)
                     
@@ -88,33 +89,38 @@ class DirectoryBruteForcer:
                 percent = (current / total_words) * 100
                 print(f"[PROGRESS] {current}/{total_words} ({percent:.1f}%) - {rate:.1f} req/sec")
     
-    def scan(self, wordlist_path):
+    def scan(self, wordlist_path, quiet=False):
         """Main scanning function with multi-threading"""
         if not self.validate_url(self.target_url):
             print(f"[ERROR] Invalid URL: {self.target_url}")
             return
         
-        print(f"[INFO] Starting directory brute force on: {self.target_url}")
-        print(f"[INFO] Using {self.threads} threads")
-        print(f"[INFO] Ignoring SSL certificate errors")
+        if not quiet:
+            print(f"[INFO] Starting directory brute force on: {self.target_url}")
+            print(f"[INFO] Using {self.threads} threads")
+            print(f"[INFO] Timeout: {self.timeout} seconds")
+            print(f"[INFO] Status codes: {', '.join(map(str, self.status_codes))}")
+            print(f"[INFO] Ignoring SSL certificate errors")
         
         # Load wordlist
         wordlist = self.load_wordlist(wordlist_path)
         if not wordlist:
             return
         
-        print(f"[INFO] Starting scan with {len(wordlist)} words...")
-        print("-" * 60)
+        if not quiet:
+            print(f"[INFO] Starting scan with {len(wordlist)} words...")
+            print("-" * 60)
         
         start_time = time.time()
         
-        # Start progress monitor thread
-        progress_thread = threading.Thread(
-            target=self.progress_monitor, 
-            args=(len(wordlist), start_time),
-            daemon=True
-        )
-        progress_thread.start()
+        # Start progress monitor thread (only if not quiet)
+        if not quiet:
+            progress_thread = threading.Thread(
+                target=self.progress_monitor, 
+                args=(len(wordlist), start_time),
+                daemon=True
+            )
+            progress_thread.start()
         
         # Multi-threaded scanning
         with ThreadPoolExecutor(max_workers=self.threads) as executor:
@@ -124,24 +130,63 @@ class DirectoryBruteForcer:
         elapsed = time.time() - start_time
         total_rate = len(wordlist) / elapsed if elapsed > 0 else 0
         
-        print("-" * 60)
-        print(f"[INFO] Scan completed in {elapsed:.1f} seconds")
-        print(f"[INFO] Average rate: {total_rate:.1f} requests/second")
-        print(f"[INFO] Found {len(self.found_directories)} interesting directories")
+        if not quiet:
+            print("-" * 60)
+            print(f"[INFO] Scan completed in {elapsed:.1f} seconds")
+            print(f"[INFO] Average rate: {total_rate:.1f} requests/second")
+            print(f"[INFO] Found {len(self.found_directories)} interesting directories")
+
+def parse_arguments():
+    """Parse command line arguments"""
+    parser = argparse.ArgumentParser(
+        description='Multi-threaded web directory and file brute forcer',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python directory_bruteforcer.py https://example.com wordlists/common.txt
+  python directory_bruteforcer.py -u https://example.com -w wordlists/common.txt -t 50
+  python directory_bruteforcer.py -u https://example.com -w wordlists/common.txt -s 200,403 -q
+        """
+    )
+    
+    parser.add_argument('url', nargs='?', help='Target URL (e.g., https://example.com)')
+    parser.add_argument('wordlist', nargs='?', help='Path to wordlist file')
+    parser.add_argument('-u', '--url', dest='url_flag', help='Target URL')
+    parser.add_argument('-w', '--wordlist', dest='wordlist_flag', help='Path to wordlist file')
+    parser.add_argument('-t', '--threads', type=int, default=20, 
+                       help='Number of threads (default: 20)')
+    parser.add_argument('--timeout', type=int, default=10,
+                       help='Request timeout in seconds (default: 10)')
+    parser.add_argument('-s', '--status-codes', default='200,301,302,403,401',
+                       help='Status codes to show (default: 200,301,302,403,401)')
+    parser.add_argument('-q', '--quiet', action='store_true',
+                       help='Quiet mode - only show results')
+    
+    return parser.parse_args()
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python directory_bruteforcer.py <target_url> <wordlist_file> [threads]")
-        print("Example: python directory_bruteforcer.py https://example.com wordlists/common.txt 20")
-        sys.exit(1)
+    args = parse_arguments()
     
-    target_url = sys.argv[1]
-    wordlist_file = sys.argv[2]
-    threads = int(sys.argv[3]) if len(sys.argv) > 3 else 20
+    # Determine URL and wordlist (support both positional and flag arguments)
+    target_url = args.url or args.url_flag
+    wordlist_file = args.wordlist or args.wordlist_flag
+    
+    if not target_url or not wordlist_file:
+        print("Error: Both URL and wordlist are required")
+        print("Usage: python directory_bruteforcer.py <url> <wordlist> [options]")
+        print("   or: python directory_bruteforcer.py -u <url> -w <wordlist> [options]")
+        sys.exit(1)
     
     # Check if wordlist exists
     if not os.path.exists(wordlist_file):
         print(f"[ERROR] Wordlist file not found: {wordlist_file}")
+        sys.exit(1)
+    
+    # Parse status codes
+    try:
+        status_codes = [int(code.strip()) for code in args.status_codes.split(',')]
+    except ValueError:
+        print(f"[ERROR] Invalid status codes format: {args.status_codes}")
         sys.exit(1)
     
     # Disable SSL warnings
@@ -149,8 +194,13 @@ def main():
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     
     # Create and run scanner
-    scanner = DirectoryBruteForcer(target_url, threads)
-    scanner.scan(wordlist_file)
+    scanner = DirectoryBruteForcer(
+        target_url, 
+        threads=args.threads,
+        timeout=args.timeout,
+        status_codes=status_codes
+    )
+    scanner.scan(wordlist_file, quiet=args.quiet)
 
 if __name__ == "__main__":
     main()
