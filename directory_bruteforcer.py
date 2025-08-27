@@ -8,9 +8,12 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import argparse
 import random
+import json
+from datetime import datetime
 
 class DirectoryBruteForcer:
-    def __init__(self, target_url, threads=20, timeout=10, status_codes=None, user_agents=None):
+    def __init__(self, target_url, threads=20, timeout=10, status_codes=None, user_agents=None, 
+                 output_file=None, min_size=0, max_size=None):
         self.target_url = self.normalize_url(target_url)
         self.session = requests.Session()
         self.found_directories = []
@@ -18,6 +21,9 @@ class DirectoryBruteForcer:
         self.timeout = timeout
         self.status_codes = status_codes or [200, 301, 302, 403, 401]
         self.user_agents = user_agents or []
+        self.output_file = output_file
+        self.min_size = min_size
+        self.max_size = max_size
         self.lock = Lock()
         self.total_tested = 0
         
@@ -83,6 +89,62 @@ class DirectoryBruteForcer:
             print(f"[ERROR] Error loading wordlist: {e}")
             return []
     
+    def filter_response(self, status_code, content_length):
+        """Filter responses based on status code and size"""
+        # Check status code
+        if status_code not in self.status_codes:
+            return False
+        
+        # Check size filters
+        if content_length < self.min_size:
+            return False
+        
+        if self.max_size is not None and content_length > self.max_size:
+            return False
+        
+        return True
+    
+    def format_result(self, url, status_code, content_length):
+        """Format result for display"""
+        size_str = f"{content_length:,}" if content_length >= 1000 else str(content_length)
+        return f"[{status_code}] {url} (Size: {size_str} bytes)"
+    
+    def save_results(self):
+        """Save results to output file"""
+        if not self.output_file or not self.found_directories:
+            return
+        
+        # Ensure results directory exists
+        os.makedirs('results', exist_ok=True)
+        
+        # Generate filename with timestamp if not specified
+        if self.output_file == 'auto':
+            domain = urlparse(self.target_url).netloc
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"results/{domain}_{timestamp}.json"
+        else:
+            filename = self.output_file
+        
+        # Prepare data for saving
+        scan_data = {
+            'target': self.target_url,
+            'timestamp': datetime.now().isoformat(),
+            'scan_info': {
+                'threads': self.threads,
+                'timeout': self.timeout,
+                'status_codes': self.status_codes,
+                'total_tested': self.total_tested,
+                'total_found': len(self.found_directories)
+            },
+            'results': self.found_directories
+        }
+        
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(scan_data, f, indent=2)
+            print(f"[INFO] Results saved to: {filename}")
+        except Exception as e:
+            print(f"[ERROR] Failed to save results: {e}")
     def test_directory(self, directory):
         """Test a single directory/file"""
         test_url = urljoin(self.target_url + '/', directory)
@@ -108,15 +170,17 @@ class DirectoryBruteForcer:
             with self.lock:
                 self.total_tested += 1
                 
-                # Print results for specified status codes
-                if status_code in self.status_codes:
-                    status_msg = f"[{status_code}] {test_url} (Size: {content_length})"
-                    print(status_msg)
+                # Apply filters and print results
+                if self.filter_response(status_code, content_length):
+                    result_msg = self.format_result(test_url, status_code, content_length)
+                    print(result_msg)
                     
                     self.found_directories.append({
                         'url': test_url,
                         'status_code': status_code,
-                        'size': content_length
+                        'size': content_length,
+                        'directory': directory,
+                        'timestamp': datetime.now().isoformat()
                     })
                 
         except requests.exceptions.RequestException as e:
@@ -187,6 +251,9 @@ class DirectoryBruteForcer:
         elapsed = time.time() - start_time
         total_rate = len(wordlist) / elapsed if elapsed > 0 else 0
         
+        # Save results to file if requested
+        self.save_results()
+        
         if not quiet:
             print("-" * 60)
             print(f"[INFO] Scan completed in {elapsed:.1f} seconds")
@@ -218,6 +285,11 @@ Examples:
                        help='Status codes to show (default: 200,301,302,403,401)')
     parser.add_argument('-q', '--quiet', action='store_true',
                        help='Quiet mode - only show results')
+    parser.add_argument('-o', '--output', help='Output file to save results (use "auto" for automatic naming)')
+    parser.add_argument('--min-size', type=int, default=0,
+                       help='Minimum response size in bytes (default: 0)')
+    parser.add_argument('--max-size', type=int,
+                       help='Maximum response size in bytes (default: no limit)')
     
     return parser.parse_args()
 
@@ -255,7 +327,10 @@ def main():
         target_url, 
         threads=args.threads,
         timeout=args.timeout,
-        status_codes=status_codes
+        status_codes=status_codes,
+        output_file=args.output,
+        min_size=args.min_size,
+        max_size=args.max_size
     )
     scanner.scan(wordlist_file, quiet=args.quiet)
 
